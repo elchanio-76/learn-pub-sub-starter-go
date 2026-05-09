@@ -39,9 +39,19 @@ func main() {
 		handlerPause(gamestate),
 	)
 	if err != nil {
-		fmt.Println("Failed to declare and bind queue")
+		fmt.Println("Failed to declare and bind pause queue")
 		panic(err)
 	}
+	mvQueueStr := "army_moves." + userName
+	mvRoutingKey := "army_moves.*"
+	err = pubsub.SubscribeJSON(
+		conn,
+		routing.ExchangePerilTopic,
+		mvQueueStr,
+		mvRoutingKey,
+		pubsub.Transient,
+		handlerArmyMoves(gamestate),
+	)
 
 	for {
 		words := gamelogic.GetInput()
@@ -54,17 +64,7 @@ func main() {
 				fmt.Println("Failed to spawn unit", err)
 				continue
 			}
-			/*
-				err = pubsub.PublishJSON(ch, routing.ExchangePerilDirect, routing.SpawnKey, routing.SpawnMessage{
-					UnitType: unitType,
-					Location: location,
-				})
-				if err != nil {
-					fmt.Println("Failed to publish message")
-					panic(err)
-				}
-				fmt.Println("Sent spawn message")
-			*/
+
 			continue
 		}
 		if words[0] == "move" {
@@ -72,9 +72,25 @@ func main() {
 				fmt.Println("Usage: move <location> <unitID>")
 				continue
 			}
-			_, err = gamestate.CommandMove(words)
+			am, err := gamestate.CommandMove(words)
 			if err != nil {
 				fmt.Println("Failed to move unit", err)
+				continue
+			}
+			// publish move
+			ch, err := conn.Channel()
+			if err != nil {
+				fmt.Println("Failed to open channel", err)
+				continue
+			}
+			err = pubsub.PublishJSON(
+				ch,
+				routing.ExchangePerilTopic,
+				mvRoutingKey,
+				am,
+			)
+			if err != nil {
+				fmt.Println("Failed to publish move", err)
 				continue
 			}
 			fmt.Println("Moved unit.")
@@ -106,11 +122,21 @@ func main() {
 	fmt.Println("Shutting down Peril client...")
 }
 
-
-func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
-	return func(ps routing.PlayingState) {
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.AckType {
+	return func(ps routing.PlayingState) pubsub.AckType {
 		defer fmt.Print("> ") // print a prompt when the function returns
 		gs.HandlePause(ps)
+		return pubsub.Ack
 	}
 }
 
+func handlerArmyMoves(gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.AckType {
+	return func(am gamelogic.ArmyMove) pubsub.AckType {
+		defer fmt.Print("> ") // print a prompt when the function returns
+		mo := gs.HandleMove(am)
+		if mo == gamelogic.MoveOutComeSafe || mo == gamelogic.MoveOutcomeMakeWar {
+			return pubsub.Ack
+		}
+		return pubsub.NackDiscard
+	}
+}
